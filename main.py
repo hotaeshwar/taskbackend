@@ -43,7 +43,7 @@ CLIENT_LIST = ["DND", "LOD", "FANTASIA", "BROADWAY", "MDB", "CHAHAL", "XAU", "FI
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "https://ameyaaccountsonline.info"],
+    allow_origins=["http://localhost:5173", "https://task.buildingindiadigital.com/"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
