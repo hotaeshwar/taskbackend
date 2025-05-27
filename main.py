@@ -746,14 +746,42 @@ class EmployeeWithSalaryResponse(UserResponse):
 # API Endpoints
 @app.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 def register_user(user: UserCreate, db: Session = Depends(get_db)):
-    # Check if username already exists
+    # Check if username already exists (including rejected employees)
     db_user = get_user(db, username=user.username)
     if db_user:
+        # Check if this user was rejected
+        if db_user.role == UserRole.EMPLOYEE and not db_user.is_approved:
+            # Check if there's a rejected approval request
+            rejected_request = db.query(ApprovalRequest).filter(
+                ApprovalRequest.employee_id == db_user.id,
+                ApprovalRequest.status == "rejected"
+            ).first()
+            
+            if rejected_request:
+                raise HTTPException(
+                    status_code=400, 
+                    detail="This username was previously rejected and cannot be reused"
+                )
+        
         raise HTTPException(status_code=400, detail="Username already registered")
     
-    # Check if email already exists
+    # Check if email already exists (including rejected employees)
     db_user_email = get_user_by_email(db, email=user.email)
     if db_user_email:
+        # Check if this user was rejected
+        if db_user_email.role == UserRole.EMPLOYEE and not db_user_email.is_approved:
+            # Check if there's a rejected approval request
+            rejected_request = db.query(ApprovalRequest).filter(
+                ApprovalRequest.employee_id == db_user_email.id,
+                ApprovalRequest.status == "rejected"
+            ).first()
+            
+            if rejected_request:
+                raise HTTPException(
+                    status_code=400, 
+                    detail="This email was previously rejected and cannot be reused"
+                )
+        
         raise HTTPException(status_code=400, detail="Email already registered")
     
     # Create new user
@@ -777,6 +805,36 @@ def register_user(user: UserCreate, db: Session = Depends(get_db)):
         db.commit()
     
     return db_user
+
+# Replace the existing get_all_employees endpoint with this updated version:
+
+@app.get("/employees", response_model=List[EmployeeWithSalaryResponse])
+def get_all_employees(
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(check_allocator_role)
+):
+    """Get all employees with their current salary information (excluding rejected employees)"""
+    
+    # Get employee IDs that have been rejected
+    rejected_employee_ids = db.query(ApprovalRequest.employee_id).filter(
+        ApprovalRequest.status == "rejected"
+    ).subquery()
+    
+    # Get employees excluding those who have been rejected
+    employees = db.query(User).filter(
+        User.role == UserRole.EMPLOYEE,
+        ~User.id.in_(rejected_employee_ids)  # Exclude rejected employees
+    ).all()
+    
+    # Enhance response with salary data
+    result = []
+    for employee in employees:
+        employee_data = employee.__dict__
+        salary = get_employee_salary(db, employee.id)
+        employee_data["current_salary"] = salary
+        result.append(employee_data)
+    
+    return result
 @app.post("/login", response_model=Token)
 def login_for_access_token(
     request: Request,
@@ -1480,11 +1538,17 @@ def get_allocator_dashboard(
     now = datetime.now(IST)
     today = now.date()
     
-    # Get all employees with approved status
+    # Get employee IDs that have been rejected
+    rejected_employee_ids = db.query(ApprovalRequest.employee_id).filter(
+        ApprovalRequest.status == "rejected"
+    ).subquery()
+    
+    # Get all employees with approved status (excluding rejected ones)
     employees = db.query(User).filter(
         User.role == UserRole.EMPLOYEE,
         User.is_approved == True,
-        User.is_active == True
+        User.is_active == True,
+        ~User.id.in_(rejected_employee_ids)  # Exclude rejected employees
     ).all()
     
     print(f"Found {len(employees)} employees for dashboard")
