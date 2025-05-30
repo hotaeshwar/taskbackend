@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi import Form
 from typing import Optional
 from sqlalchemy.orm import joinedload
+
 # JWT settings
 SECRET_KEY = "gtZcWep!>oTJbF#TnQ%f>Oxn9pt'/{H;"
 ALGORITHM = "HS256"
@@ -808,33 +809,7 @@ def register_user(user: UserCreate, db: Session = Depends(get_db)):
 
 # Replace the existing get_all_employees endpoint with this updated version:
 
-@app.get("/employees", response_model=List[EmployeeWithSalaryResponse])
-def get_all_employees(
-    db: Session = Depends(get_db), 
-    current_user: User = Depends(check_allocator_role)
-):
-    """Get all employees with their current salary information (excluding rejected employees)"""
-    
-    # Get employee IDs that have been rejected
-    rejected_employee_ids = db.query(ApprovalRequest.employee_id).filter(
-        ApprovalRequest.status == "rejected"
-    ).subquery()
-    
-    # Get employees excluding those who have been rejected
-    employees = db.query(User).filter(
-        User.role == UserRole.EMPLOYEE,
-        ~User.id.in_(rejected_employee_ids)  # Exclude rejected employees
-    ).all()
-    
-    # Enhance response with salary data
-    result = []
-    for employee in employees:
-        employee_data = employee.__dict__
-        salary = get_employee_salary(db, employee.id)
-        employee_data["current_salary"] = salary
-        result.append(employee_data)
-    
-    return result
+
 @app.post("/login", response_model=Token)
 def login_for_access_token(
     request: Request,
@@ -1028,16 +1003,37 @@ def get_all_clients(db: Session = Depends(get_db), current_user: User = Depends(
 # Employee Management for Allocators
 @app.get("/employees", response_model=List[EmployeeWithSalaryResponse])
 def get_all_employees(
+    include_rejected: bool = False,  # Query parameter to optionally include rejected employees
     db: Session = Depends(get_db), 
     current_user: User = Depends(check_allocator_role)
 ):
-    """Get all employees with their current salary information"""
-    employees = db.query(User).filter(User.role == UserRole.EMPLOYEE).all()
+    """
+    Get all employees with their current salary information
+    
+    Args:
+        include_rejected: If True, includes employees who have been rejected. Default: False
+    """
+    
+    # Start with base query for all employees
+    query = db.query(User).filter(User.role == UserRole.EMPLOYEE)
+    
+    # If not including rejected employees, exclude them
+    if not include_rejected:
+        # Get employee IDs that have been rejected
+        rejected_employee_ids = db.query(ApprovalRequest.employee_id).filter(
+            ApprovalRequest.status == "rejected"
+        ).subquery()
+        
+        # Exclude rejected employees from the query
+        query = query.filter(~User.id.in_(rejected_employee_ids))
+    
+    # Execute the query
+    employees = query.all()
     
     # Enhance response with salary data
     result = []
     for employee in employees:
-        employee_data = employee.__dict__
+        employee_data = employee.__dict__.copy()  # Use copy() to avoid modifying original
         salary = get_employee_salary(db, employee.id)
         employee_data["current_salary"] = salary
         result.append(employee_data)
