@@ -22,6 +22,7 @@ from sqlalchemy.orm import joinedload
 # JWT settings
 SECRET_KEY = "gtZcWep!>oTJbF#TnQ%f>Oxn9pt'/{H;"
 ALGORITHM = "HS256"
+SECRET_ALLOCATOR_KEY = "Task_Allocater_BiD_Himanshu_Neha"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 IST = pytz.timezone('Asia/Kolkata')
 # Setup FastAPI
@@ -299,11 +300,22 @@ class UserCreate(UserBase):
     password: str
     confirm_password: str
     role: UserRole
+    secret_key: Optional[str] = None  # Add this field
     
     @validator('confirm_password')
     def passwords_match(cls, v, values):
         if 'password' in values and v != values['password']:
             raise ValueError('Passwords do not match')
+        return v
+    
+    @validator('secret_key')
+    def validate_secret_key(cls, v, values):
+        # Only validate secret key if role is ALLOCATOR
+        if 'role' in values and values['role'] == UserRole.ALLOCATOR:
+            if not v:
+                raise ValueError('Secret key is required for allocator registration')
+            if v != SECRET_ALLOCATOR_KEY:
+                raise ValueError('Invalid secret key')
         return v
 
 class UserLogin(BaseModel):
@@ -887,6 +899,14 @@ def register_user(user: UserCreate, db: Session = Depends(get_db)):
         
         raise HTTPException(status_code=400, detail="Email already registered")
     
+    # Validate secret key for allocator registration
+    if user.role == UserRole.ALLOCATOR:
+        if not user.secret_key or user.secret_key != SECRET_ALLOCATOR_KEY:
+            raise HTTPException(
+                status_code=400, 
+                detail="Invalid or missing secret key for allocator registration"
+            )
+    
     # Create new user
     hashed_password = get_password_hash(user.password)
     db_user = User(
@@ -908,7 +928,6 @@ def register_user(user: UserCreate, db: Session = Depends(get_db)):
         db.commit()
     
     return db_user
-
 @app.post("/login", response_model=Token)
 def login_for_access_token(
     request: Request,
@@ -1550,10 +1569,10 @@ def create_weekly_sheet(
     # Create entries
     for entry_data in sheet_data.entries:
         # Validate client name
-        if entry_data.client_name not in CLIENT_LIST:
+        if entry_data.client_name not in DEFAULT_CLIENTS:
             raise HTTPException(
                 status_code=400, 
-                detail=f"Invalid client name. Must be one of: {', '.join(CLIENT_LIST)}"
+                detail=f"Invalid client name. Must be one of: {', '.join(DEFAULT_CLIENTS)}"
             )
         
         # Validate week number
@@ -1731,7 +1750,7 @@ def auto_generate_monthly_sheets(
         db.refresh(new_sheet)
         
         # Create default entries for all clients and weeks
-        for client in CLIENT_LIST:
+        for client in DEFAULT_CLIENTS:
             for week in range(1, 6):  # Weeks 1-5
                 entry = WeeklySheetEntry(
                     sheet_id=new_sheet.id,
@@ -1933,7 +1952,7 @@ def get_sheet_template(
     """Get a template structure for creating weekly sheets"""
     
     template = {
-        "clients": CLIENT_LIST,
+        "clients": DEFAULT_CLIENTS,
         "weeks": [
             {"week_number": 1, "date_range": "1-7"},
             {"week_number": 2, "date_range": "8-14"},
