@@ -40,7 +40,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 # Client list
-CLIENT_LIST = ["DND", "LOD", "FANTASIA", "BROADWAY", "MDB", "CHAHAL", "XAU", "FINSYNC", "AMEY", "BiD"]
+DEFAULT_CLIENTS = ["DND", "LOD", "FANTASIA", "BROADWAY", "MDB", "Rotomag", "XAU", "FINSYNC", "AMEY", "BiD"]
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -272,7 +272,8 @@ Base.metadata.create_all(bind=engine)
 
 # Initialize clients
 def init_clients(db: Session):
-    for client_name in CLIENT_LIST:
+    """Initialize default clients if they don't exist (only runs once)"""
+    for client_name in DEFAULT_CLIENTS:
         existing_client = db.query(Client).filter(Client.name == client_name).first()
         if not existing_client:
             new_client = Client(name=client_name)
@@ -399,7 +400,15 @@ class TaskReportResponse(BaseModel):
     
     class Config:
         orm_mode = True
-
+class ClientCreate(BaseModel):
+    name: str
+    
+    @validator('name')
+    def validate_name(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Client name cannot be empty')
+        # Convert to uppercase and remove extra spaces
+        return v.strip().upper()
 class WorkSessionCreate(BaseModel):
     notes: Optional[str] = None
 
@@ -2669,7 +2678,69 @@ def get_employee_net_salary(
         "period_end": month_end,
         "last_updated": now
     }
+@app.post("/clients/add", response_model=ClientResponse)
+async def add_client(
+    client_data: ClientCreate,
+    current_user: User = Depends(check_allocator_role),
+    db: Session = Depends(get_db)
+):
+    """
+    Add a new client (Allocator only)
+    """
+    # Check if client already exists
+    existing_client = db.query(Client).filter(Client.name == client_data.name).first()
+    if existing_client:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Client '{client_data.name}' already exists"
+        )
+    
+    # Create new client
+    new_client = Client(name=client_data.name)
+    db.add(new_client)
+    db.commit()
+    db.refresh(new_client)
+    
+    return new_client
 
+@app.delete("/clients/delete/{client_id}")
+async def delete_client(
+    client_id: int,
+    current_user: User = Depends(check_allocator_role),
+    db: Session = Depends(get_db)
+):
+    """
+    Delete a client (Allocator only)
+    """
+    # Get the client
+    client = db.query(Client).filter(Client.id == client_id).first()
+    if not client:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Client not found"
+        )
+    
+    # Check if client has associated tasks
+    task_count = db.query(Task).filter(Task.client_id == client_id).count()
+    if task_count > 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot delete client '{client.name}' because it has {task_count} associated tasks"
+        )
+    
+    # Check if client has associated weekly sheet entries
+    sheet_entries_count = db.query(WeeklySheetEntry).filter(WeeklySheetEntry.client_name == client.name).count()
+    if sheet_entries_count > 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot delete client '{client.name}' because it has weekly sheet entries"
+        )
+    
+    # Delete the client
+    db.delete(client)
+    db.commit()
+    
+    return {"message": f"Client '{client.name}' deleted successfully"}
 @app.get("/employees/timesheets", response_model=List[Dict])
 def get_employee_timesheets(
     start_date: Optional[date] = None,
@@ -2729,3 +2800,5 @@ def get_employee_timesheets(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+    
+#new endpoint added
