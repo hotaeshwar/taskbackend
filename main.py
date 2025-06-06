@@ -40,7 +40,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 # Client list
-CLIENT_LIST = ["DND", "LOD", "FANTASIA", "BROADWAY", "MDB", "CHAHAL", "XAU", "FINSYNC", "AMEYA", "Bid"]
+CLIENT_LIST = ["DND", "LOD", "FANTASIA", "BROADWAY", "MDB", "CHAHAL", "XAU", "FINSYNC", "AMEY", "BiD"]
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
@@ -82,6 +82,9 @@ class User(Base):
     task_reports = relationship("TaskReport", back_populates="employee")
     payroll_records = relationship("PayrollRecord", back_populates="employee")
     salaries = relationship("EmployeeSalary", back_populates="employee")
+    # Weekly sheet relationships
+    created_sheets = relationship("WeeklySheet", foreign_keys="WeeklySheet.created_by", back_populates="creator")
+    assigned_sheets = relationship("WeeklySheet", foreign_keys="WeeklySheet.assigned_to", back_populates="assignee")
 
 class ApprovalRequest(Base):
     __tablename__ = "approval_requests"
@@ -147,6 +150,7 @@ class TaskReport(Base):
     
     task = relationship("Task", back_populates="report")
     employee = relationship("User", back_populates="task_reports")
+
 class WorkSession(Base):
     __tablename__ = "work_sessions"
     __table_args__ = (
@@ -198,6 +202,7 @@ class PayrollPeriod(Base):
     creator = relationship("User", foreign_keys=[created_by])
     locker = relationship("User", foreign_keys=[locked_by])
     records = relationship("PayrollRecord", back_populates="period")
+
 class PayrollRecord(Base):
     __tablename__ = "payroll_records"
     __table_args__ = (
@@ -228,6 +233,39 @@ class PayrollRecord(Base):
     employee = relationship("User", back_populates="payroll_records")
     period = relationship("PayrollPeriod", back_populates="records")
 
+# NEW WEEKLY SHEET MODELS
+class WeeklySheet(Base):
+    __tablename__ = "weekly_sheets"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    sheet_id = Column(String, unique=True, index=True)
+    month = Column(Integer)  # 1-12
+    year = Column(Integer)
+    created_by = Column(Integer, ForeignKey("users.id"))  # Allocator who created
+    assigned_to = Column(Integer, ForeignKey("users.id"), nullable=True)  # Employee assigned (if any)
+    is_template = Column(Boolean, default=False)  # True if it's allocator template, False if employee sheet
+    status = Column(String, default="draft")  # draft, submitted, approved, rejected
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    submitted_at = Column(DateTime, nullable=True)
+    
+    creator = relationship("User", foreign_keys=[created_by], back_populates="created_sheets")
+    assignee = relationship("User", foreign_keys=[assigned_to], back_populates="assigned_sheets")
+    entries = relationship("WeeklySheetEntry", back_populates="sheet", cascade="all, delete-orphan")
+
+class WeeklySheetEntry(Base):
+    __tablename__ = "weekly_sheet_entries"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    sheet_id = Column(Integer, ForeignKey("weekly_sheets.id"))
+    client_name = Column(String)  # DND, LOD, FANTASIA, etc.
+    week_number = Column(Integer)  # 1-5
+    posts_count = Column(Integer, default=0)
+    reels_count = Column(Integer, default=0)
+    story_description = Column(Text, nullable=True)
+    is_topical_day = Column(Boolean, default=False)
+    
+    sheet = relationship("WeeklySheet", back_populates="entries")
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -305,6 +343,7 @@ class UserResponse(UserBase):
     id: int
     role: str
     is_active: bool
+    is_approved: bool
     
     class Config:
         orm_mode = True
@@ -348,6 +387,7 @@ class TaskReportCreate(BaseModel):
     hurdles_faced: str
     hours_worked: float
     work_location: str = "office"  # Add this new field with a default value
+
 class TaskReportResponse(BaseModel):
     id: int
     completion_description: str
@@ -359,8 +399,6 @@ class TaskReportResponse(BaseModel):
     
     class Config:
         orm_mode = True
-    
-    
 
 class WorkSessionCreate(BaseModel):
     notes: Optional[str] = None
@@ -398,11 +436,17 @@ class EmployeeSalaryResponse(BaseModel):
     class Config:
         orm_mode = True
         from_attributes = True  # This is the key fix for Pydantic v2
+
 class EmployeeWithSalaryResponse(UserResponse):
     current_salary: Optional[EmployeeSalaryResponse] = None
+    salary_history: Optional[List[EmployeeSalaryResponse]] = Field(None, exclude=True)
     
-    class Config:
-        orm_mode = True
+    @validator('salary_history', pre=True, always=True)
+    def set_salary_history(cls, v, values, **kwargs):
+        if 'id' in values:
+            # This assumes the salary history will be added during object creation
+            return v or []
+        return []
 
 class TaskResponse(BaseModel):
     id: int
@@ -463,6 +507,60 @@ class PayrollCalculationParams(BaseModel):
     overtime_multiplier: float = Field(1.5, description="Overtime pay multiplier (default 1.5)")
     apply_deductions: bool = Field(True, description="Apply deductions for undertime (default True)")
 
+# NEW WEEKLY SHEET PYDANTIC MODELS
+class WeeklySheetEntryCreate(BaseModel):
+    client_name: str
+    week_number: int
+    posts_count: int = 0
+    reels_count: int = 0
+    story_description: Optional[str] = None
+    is_topical_day: bool = False
+
+class WeeklySheetEntryUpdate(BaseModel):
+    posts_count: Optional[int] = None
+    reels_count: Optional[int] = None
+    story_description: Optional[str] = None
+
+class WeeklySheetEntryResponse(BaseModel):
+    id: int
+    client_name: str
+    week_number: int
+    posts_count: int
+    reels_count: int
+    story_description: Optional[str]
+    is_topical_day: bool
+    
+    class Config:
+        orm_mode = True
+
+class WeeklySheetCreate(BaseModel):
+    month: int
+    year: int
+    assigned_to: Optional[int] = None  # Employee ID if assigning to specific employee
+    entries: List[WeeklySheetEntryCreate]
+
+class WeeklySheetUpdate(BaseModel):
+    entries: List[WeeklySheetEntryUpdate]
+
+class WeeklySheetResponse(BaseModel):
+    id: int
+    sheet_id: str
+    month: int
+    year: int
+    created_by: int
+    assigned_to: Optional[int]
+    is_template: bool
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    submitted_at: Optional[datetime]
+    creator: UserResponse
+    assignee: Optional[UserResponse]
+    entries: List[WeeklySheetEntryResponse]
+    
+    class Config:
+        orm_mode = True
+
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
 
@@ -490,6 +588,16 @@ def generate_task_id():
     """Generate a unique task ID with prefix Task- and a hexadecimal code"""
     hex_code = uuid.uuid4().hex[:8]
     return f"Task-{hex_code}"
+
+# NEW HELPER FUNCTIONS FOR WEEKLY SHEETS
+def generate_sheet_id():
+    """Generate a unique sheet ID"""
+    return f"SHEET-{uuid.uuid4().hex[:8]}"
+
+def get_current_month_year():
+    """Get current month and year"""
+    now = datetime.now(IST)
+    return now.month, now.year
 
 def get_user(db: Session, username: str):
     return db.query(User).filter(User.username == username).first()
@@ -556,6 +664,7 @@ def check_employee_role(current_user: User = Depends(get_current_user)):
             detail="You don't have permission to perform this action. Employee role required."
         )
     return current_user
+
 def ensure_timezone_aware(dt, timezone=IST):
     """Ensure a datetime object has timezone information."""
     if dt is None:
@@ -567,6 +676,7 @@ def ensure_timezone_aware(dt, timezone=IST):
 def now_with_timezone():
     """Get current datetime with IST timezone."""
     return datetime.now(IST)
+
 def get_employee_salary(db: Session, employee_id: int):
     return db.query(EmployeeSalary).filter(
         EmployeeSalary.employee_id == employee_id
@@ -675,6 +785,7 @@ def calculate_employee_payroll(
     )
     
     return record
+
 def generate_payroll_for_period(
     db: Session,
     period_id: int,
@@ -725,25 +836,7 @@ def generate_payroll_for_period(
         period.status = "draft"
         db.commit()
         raise
-class UserResponse(UserBase):
-    id: int
-    role: str
-    is_active: bool
-    is_approved: bool
-    
-    class Config:
-        orm_mode = True
 
-class EmployeeWithSalaryResponse(UserResponse):
-    current_salary: Optional[EmployeeSalaryResponse] = None
-    salary_history: Optional[List[EmployeeSalaryResponse]] = Field(None, exclude=True)
-    
-    @validator('salary_history', pre=True, always=True)
-    def set_salary_history(cls, v, values, **kwargs):
-        if 'id' in values:
-            # This assumes the salary history will be added during object creation
-            return v or []
-        return []
 # API Endpoints
 @app.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 def register_user(user: UserCreate, db: Session = Depends(get_db)):
@@ -806,9 +899,6 @@ def register_user(user: UserCreate, db: Session = Depends(get_db)):
         db.commit()
     
     return db_user
-
-# Replace the existing get_all_employees endpoint with this updated version:
-
 
 @app.post("/login", response_model=Token)
 def login_for_access_token(
@@ -1098,6 +1188,7 @@ def get_employee_salary_history(
     return db.query(EmployeeSalary).filter(
         EmployeeSalary.employee_id == employee_id
     ).order_by(EmployeeSalary.effective_from.desc()).all()
+
 # Task Management for Allocators
 @app.post("/tasks", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
 def create_task(
@@ -1133,6 +1224,7 @@ def create_task(
     db.refresh(new_task)
     
     return new_task
+
 @app.get("/tasks", response_model=List[TaskResponse])
 def get_all_tasks(
     db: Session = Depends(get_db),
@@ -1166,6 +1258,7 @@ def get_task(
         raise HTTPException(status_code=403, detail="Not authorized to access this task")
     
     return task
+
 @app.put("/tasks/{task_id}/status", response_model=TaskResponse)
 def update_task_status(
     task_id: int,
@@ -1190,6 +1283,7 @@ def update_task_status(
     db.refresh(task)
     
     return task
+
 @app.get("/allocators/employee/{employee_id}/timesheets", response_model=List[Dict])
 def get_employee_timesheets_for_allocator(
     employee_id: int,
@@ -1303,6 +1397,7 @@ def clear_employee_timesheets(
         "message": f"Successfully deleted {count} timesheet entries before {before_date.isoformat()}",
         "deleted_count": count
     }
+
 @app.delete("/employees/timesheets")
 def clear_employee_own_timesheets(
     before_date: date,  # Delete sessions before this date
@@ -1333,6 +1428,7 @@ def clear_employee_own_timesheets(
         "message": f"Successfully deleted {count} timesheet entries before {before_date.isoformat()}",
         "deleted_count": count
     }
+
 # Task reporting for employees
 @app.post("/tasks/{task_id}/report", response_model=TaskReportResponse)
 def submit_task_report(
@@ -1371,6 +1467,7 @@ def submit_task_report(
     db.refresh(new_report)
     
     return new_report
+
 # Endpoint for allocators to get tasks by client
 @app.get("/tasks/client/{client_id}", response_model=List[TaskResponse])
 def get_tasks_by_client(
@@ -1389,6 +1486,461 @@ def get_tasks_by_client(
     ).all()
     
     return tasks
+
+# NEW WEEKLY SHEET ENDPOINTS
+
+@app.post("/allocators/weekly-sheets", response_model=WeeklySheetResponse)
+def create_weekly_sheet(
+    sheet_data: WeeklySheetCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(check_allocator_role)
+):
+    """Create a new weekly sheet (allocator creates template or assigns to employee)"""
+    
+    # Validate month and year
+    if not (1 <= sheet_data.month <= 12):
+        raise HTTPException(status_code=400, detail="Month must be between 1 and 12")
+    
+    # Check if employee exists (if assigned)
+    if sheet_data.assigned_to:
+        employee = db.query(User).filter(
+            User.id == sheet_data.assigned_to,
+            User.role == UserRole.EMPLOYEE
+        ).first()
+        if not employee:
+            raise HTTPException(status_code=404, detail="Employee not found")
+    
+    # Check if sheet already exists for this month/year/employee combination
+    existing_sheet = db.query(WeeklySheet).filter(
+        WeeklySheet.month == sheet_data.month,
+        WeeklySheet.year == sheet_data.year,
+        WeeklySheet.assigned_to == sheet_data.assigned_to,
+        WeeklySheet.created_by == current_user.id
+    ).first()
+    
+    if existing_sheet:
+        raise HTTPException(
+            status_code=400, 
+            detail="Sheet already exists for this month/year/employee combination"
+        )
+    
+    # Create the sheet
+    new_sheet = WeeklySheet(
+        sheet_id=generate_sheet_id(),
+        month=sheet_data.month,
+        year=sheet_data.year,
+        created_by=current_user.id,
+        assigned_to=sheet_data.assigned_to,
+        is_template=sheet_data.assigned_to is None
+    )
+    
+    db.add(new_sheet)
+    db.commit()
+    db.refresh(new_sheet)
+    
+    # Create entries
+    for entry_data in sheet_data.entries:
+        # Validate client name
+        if entry_data.client_name not in CLIENT_LIST:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid client name. Must be one of: {', '.join(CLIENT_LIST)}"
+            )
+        
+        # Validate week number
+        if not (1 <= entry_data.week_number <= 5):
+            raise HTTPException(status_code=400, detail="Week number must be between 1 and 5")
+        
+        entry = WeeklySheetEntry(
+            sheet_id=new_sheet.id,
+            client_name=entry_data.client_name,
+            week_number=entry_data.week_number,
+            posts_count=entry_data.posts_count,
+            reels_count=entry_data.reels_count,
+            story_description=entry_data.story_description,
+            is_topical_day=entry_data.is_topical_day
+        )
+        db.add(entry)
+    
+    db.commit()
+    db.refresh(new_sheet)
+    
+    return new_sheet
+
+@app.get("/allocators/weekly-sheets", response_model=List[WeeklySheetResponse])
+def get_allocator_weekly_sheets(
+    month: Optional[int] = None,
+    year: Optional[int] = None,
+    employee_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(check_allocator_role)
+):
+    """Get weekly sheets created by the allocator"""
+    
+    query = db.query(WeeklySheet).filter(WeeklySheet.created_by == current_user.id)
+    
+    # Filter by month if provided
+    if month:
+        query = query.filter(WeeklySheet.month == month)
+    
+    # Filter by year if provided
+    if year:
+        query = query.filter(WeeklySheet.year == year)
+    
+    # Filter by employee if provided
+    if employee_id:
+        query = query.filter(WeeklySheet.assigned_to == employee_id)
+    
+    return query.order_by(WeeklySheet.created_at.desc()).all()
+
+@app.get("/allocators/weekly-sheets/{sheet_id}", response_model=WeeklySheetResponse)
+def get_weekly_sheet_detail(
+    sheet_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(check_allocator_role)
+):
+    """Get detailed view of a specific weekly sheet"""
+    
+    sheet = db.query(WeeklySheet).filter(WeeklySheet.sheet_id == sheet_id).first()
+    if not sheet:
+        raise HTTPException(status_code=404, detail="Sheet not found")
+    
+    # Check permission - allow any allocator to see any sheet
+    if sheet.created_by != current_user.id and sheet.status != "submitted":
+        raise HTTPException(status_code=403, detail="Not authorized to view this sheet")
+    
+    return sheet
+
+@app.put("/allocators/weekly-sheets/{sheet_id}", response_model=WeeklySheetResponse)
+def update_weekly_sheet(
+    sheet_id: str,
+    updates: Dict[str, Any],
+    db: Session = Depends(get_db),
+    current_user: User = Depends(check_allocator_role)
+):
+    """Update a weekly sheet (allocator can edit any sheet)"""
+    
+    sheet = db.query(WeeklySheet).filter(WeeklySheet.sheet_id == sheet_id).first()
+    if not sheet:
+        raise HTTPException(status_code=404, detail="Sheet not found")
+    
+    # Update entries if provided
+    if "entries" in updates:
+        for entry_update in updates["entries"]:
+            if "id" in entry_update:
+                entry = db.query(WeeklySheetEntry).filter(
+                    WeeklySheetEntry.id == entry_update["id"],
+                    WeeklySheetEntry.sheet_id == sheet.id
+                ).first()
+                
+                if entry:
+                    if "posts_count" in entry_update:
+                        entry.posts_count = entry_update["posts_count"]
+                    if "reels_count" in entry_update:
+                        entry.reels_count = entry_update["reels_count"]
+                    if "story_description" in entry_update:
+                        entry.story_description = entry_update["story_description"]
+    
+    # Update sheet status if provided
+    if "status" in updates:
+        sheet.status = updates["status"]
+    
+    sheet.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(sheet)
+    
+    return sheet
+
+@app.get("/allocators/employee-sheets/submitted", response_model=List[WeeklySheetResponse])
+def get_submitted_employee_sheets(
+    month: Optional[int] = None,
+    year: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(check_allocator_role)
+):
+    """Get all submitted employee sheets for review"""
+    
+    query = db.query(WeeklySheet).filter(
+        WeeklySheet.status == "submitted",
+        WeeklySheet.is_template == False
+    )
+    
+    # Filter by month if provided
+    if month:
+        query = query.filter(WeeklySheet.month == month)
+    
+    # Filter by year if provided
+    if year:
+        query = query.filter(WeeklySheet.year == year)
+    
+    return query.order_by(WeeklySheet.submitted_at.desc()).all()
+
+@app.post("/allocators/auto-generate-monthly-sheets")
+def auto_generate_monthly_sheets(
+    month: int,
+    year: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(check_allocator_role)
+):
+    """Auto-generate weekly sheets for all employees for a specific month"""
+    
+    if not (1 <= month <= 12):
+        raise HTTPException(status_code=400, detail="Month must be between 1 and 12")
+    
+    # Get all active employees
+    employees = db.query(User).filter(
+        User.role == UserRole.EMPLOYEE,
+        User.is_active == True,
+        User.is_approved == True
+    ).all()
+    
+    created_sheets = []
+    
+    for employee in employees:
+        # Check if sheet already exists
+        existing_sheet = db.query(WeeklySheet).filter(
+            WeeklySheet.month == month,
+            WeeklySheet.year == year,
+            WeeklySheet.assigned_to == employee.id
+        ).first()
+        
+        if existing_sheet:
+            continue  # Skip if already exists
+        
+        # Create sheet for employee
+        new_sheet = WeeklySheet(
+            sheet_id=generate_sheet_id(),
+            month=month,
+            year=year,
+            created_by=current_user.id,
+            assigned_to=employee.id,
+            is_template=False
+        )
+        
+        db.add(new_sheet)
+        db.commit()
+        db.refresh(new_sheet)
+        
+        # Create default entries for all clients and weeks
+        for client in CLIENT_LIST:
+            for week in range(1, 6):  # Weeks 1-5
+                entry = WeeklySheetEntry(
+                    sheet_id=new_sheet.id,
+                    client_name=client,
+                    week_number=week,
+                    posts_count=0,
+                    reels_count=0,
+                    story_description="COLLAGE + WTSAP STORY",
+                    is_topical_day=False
+                )
+                db.add(entry)
+        
+        db.commit()
+        created_sheets.append({
+            "employee_id": employee.id,
+            "employee_name": employee.username,
+            "sheet_id": new_sheet.sheet_id
+        })
+    
+    return {
+        "message": f"Created {len(created_sheets)} sheets for {month}/{year}",
+        "created_sheets": created_sheets
+    }
+
+# EMPLOYEE WEEKLY SHEET ENDPOINTS
+
+@app.get("/employees/weekly-sheets", response_model=List[WeeklySheetResponse])
+def get_employee_weekly_sheets(
+    month: Optional[int] = None,
+    year: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(check_employee_role)
+):
+    """Get weekly sheets assigned to the employee"""
+    
+    query = db.query(WeeklySheet).filter(WeeklySheet.assigned_to == current_user.id)
+    
+    # Filter by month if provided
+    if month:
+        query = query.filter(WeeklySheet.month == month)
+    
+    # Filter by year if provided  
+    if year:
+        query = query.filter(WeeklySheet.year == year)
+    
+    return query.order_by(WeeklySheet.created_at.desc()).all()
+
+@app.get("/employees/weekly-sheets/current", response_model=Optional[WeeklySheetResponse])
+def get_current_month_sheet(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(check_employee_role)
+):
+    """Get the current month's weekly sheet for the employee"""
+    
+    current_month, current_year = get_current_month_year()
+    
+    sheet = db.query(WeeklySheet).filter(
+        WeeklySheet.assigned_to == current_user.id,
+        WeeklySheet.month == current_month,
+        WeeklySheet.year == current_year
+    ).first()
+    
+    return sheet
+
+@app.post("/employees/weekly-sheets/{sheet_id}/copy", response_model=WeeklySheetResponse)
+def copy_sheet_for_employee(
+    sheet_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(check_employee_role)
+):
+    """Employee creates their own copy of an assigned sheet to work on"""
+    
+    # Find the original sheet
+    original_sheet = db.query(WeeklySheet).filter(
+        WeeklySheet.sheet_id == sheet_id,
+        WeeklySheet.assigned_to == current_user.id
+    ).first()
+    
+    if not original_sheet:
+        raise HTTPException(status_code=404, detail="Sheet not found or not assigned to you")
+    
+    # Check if employee already has a working copy
+    existing_copy = db.query(WeeklySheet).filter(
+        WeeklySheet.month == original_sheet.month,
+        WeeklySheet.year == original_sheet.year,
+        WeeklySheet.created_by == current_user.id,
+        WeeklySheet.assigned_to == current_user.id
+    ).first()
+    
+    if existing_copy:
+        raise HTTPException(status_code=400, detail="You already have a working copy for this month")
+    
+    # Create employee's working copy
+    employee_sheet = WeeklySheet(
+        sheet_id=generate_sheet_id(),
+        month=original_sheet.month,
+        year=original_sheet.year,
+        created_by=current_user.id,
+        assigned_to=current_user.id,
+        is_template=False
+    )
+    
+    db.add(employee_sheet)
+    db.commit()
+    db.refresh(employee_sheet)
+    
+    # Copy all entries
+    for original_entry in original_sheet.entries:
+        new_entry = WeeklySheetEntry(
+            sheet_id=employee_sheet.id,
+            client_name=original_entry.client_name,
+            week_number=original_entry.week_number,
+            posts_count=original_entry.posts_count,
+            reels_count=original_entry.reels_count,
+            story_description=original_entry.story_description,
+            is_topical_day=original_entry.is_topical_day
+        )
+        db.add(new_entry)
+    
+    db.commit()
+    db.refresh(employee_sheet)
+    
+    return employee_sheet
+
+@app.put("/employees/weekly-sheets/{sheet_id}", response_model=WeeklySheetResponse)
+def update_employee_sheet(
+    sheet_id: str,
+    updates: Dict[str, Any],
+    db: Session = Depends(get_db),
+    current_user: User = Depends(check_employee_role)
+):
+    """Employee updates their own weekly sheet"""
+    
+    sheet = db.query(WeeklySheet).filter(
+        WeeklySheet.sheet_id == sheet_id,
+        WeeklySheet.created_by == current_user.id
+    ).first()
+    
+    if not sheet:
+        raise HTTPException(status_code=404, detail="Sheet not found or not owned by you")
+    
+    if sheet.status == "submitted":
+        raise HTTPException(status_code=400, detail="Cannot edit submitted sheet")
+    
+    # Update entries if provided
+    if "entries" in updates:
+        for entry_update in updates["entries"]:
+            if "id" in entry_update:
+                entry = db.query(WeeklySheetEntry).filter(
+                    WeeklySheetEntry.id == entry_update["id"],
+                    WeeklySheetEntry.sheet_id == sheet.id
+                ).first()
+                
+                if entry:
+                    if "posts_count" in entry_update:
+                        entry.posts_count = entry_update["posts_count"]
+                    if "reels_count" in entry_update:
+                        entry.reels_count = entry_update["reels_count"]
+                    if "story_description" in entry_update:
+                        entry.story_description = entry_update["story_description"]
+    
+    sheet.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(sheet)
+    
+    return sheet
+
+@app.post("/employees/weekly-sheets/{sheet_id}/submit", response_model=WeeklySheetResponse)
+def submit_employee_sheet(
+    sheet_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(check_employee_role)
+):
+    """Employee submits their weekly sheet for review"""
+    
+    sheet = db.query(WeeklySheet).filter(
+        WeeklySheet.sheet_id == sheet_id,
+        WeeklySheet.created_by == current_user.id
+    ).first()
+    
+    if not sheet:
+        raise HTTPException(status_code=404, detail="Sheet not found or not owned by you")
+    
+    if sheet.status == "submitted":
+        raise HTTPException(status_code=400, detail="Sheet already submitted")
+    
+    sheet.status = "submitted"
+    sheet.submitted_at = datetime.utcnow()
+    db.commit()
+    db.refresh(sheet)
+    
+    return sheet
+
+@app.get("/weekly-sheets/template", response_model=Dict)
+def get_sheet_template(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Get a template structure for creating weekly sheets"""
+    
+    template = {
+        "clients": CLIENT_LIST,
+        "weeks": [
+            {"week_number": 1, "date_range": "1-7"},
+            {"week_number": 2, "date_range": "8-14"},
+            {"week_number": 3, "date_range": "15-21"},
+            {"week_number": 4, "date_range": "22-28"},
+            {"week_number": 5, "date_range": "29-30"}
+        ],
+        "content_types": ["POSTS", "REELS", "STORY"],
+        "story_templates": [
+            "COLLAGE + WTSAP STORY",
+            "GRID POST STORY",
+            "CUSTOM CONTENT"
+        ]
+    }
+    
+    return template
 
 # Employee dashboard - get tasks summary
 # Employee dashboard
@@ -1523,6 +2075,7 @@ async def get_employee_dashboard(
         "current_time": now.isoformat(),
         "current_payroll_period": payroll_period_data
     }
+
 # Allocator dashboard
 # Replace the existing get_allocator_dashboard function with this fixed version
 @app.get("/allocators/dashboard")
@@ -1713,6 +2266,7 @@ def get_allocator_dashboard(
         "rejected_tasks": rejected_tasks,
         "completed_tasks_awaiting_review": completed_tasks_awaiting_review
     }
+
 @app.post("/employees/clock-in", response_model=WorkSessionResponse)
 def employee_clock_in(
     session_data: WorkSessionCreate,
@@ -1788,6 +2342,7 @@ def employee_clock_out(
     db.refresh(active_session)
     
     return active_session
+
 # Get current work session status
 # Get work session status
 @app.get("/employees/work-session/status")
@@ -1872,6 +2427,7 @@ def get_employee_work_sessions_for_allocator(
     query = query.order_by(WorkSession.clock_in.desc())
     
     return query.all()
+
 @app.post("/payroll/periods", response_model=PayrollPeriodResponse)
 def create_payroll_period(
     period_data: PayrollPeriodCreate,
@@ -1939,6 +2495,7 @@ def lock_payroll_period(
     db.commit()
     
     return {"message": "Payroll period locked successfully"}
+
 @app.get("/payroll/periods", response_model=List[PayrollPeriodResponse])
 def get_payroll_periods(
     db: Session = Depends(get_db),
@@ -1946,6 +2503,7 @@ def get_payroll_periods(
 ):
     """Get all payroll periods"""
     return db.query(PayrollPeriod).order_by(PayrollPeriod.created_at.desc()).all()
+
 @app.get("/payroll/periods/{period_id}", response_model=List[PayrollRecordResponse])
 def get_payroll_period_details(
     period_id: int,
@@ -1963,6 +2521,7 @@ def get_payroll_period_details(
     return db.query(PayrollRecord).filter(
         PayrollRecord.period_id == period_id
     ).all()
+
 @app.get("/tasks/employee/{employee_id}", response_model=List[TaskResponse])
 def get_tasks_by_employee(
     employee_id: int,
@@ -1994,120 +2553,7 @@ def get_tasks_by_employee(
     tasks = db.query(Task).filter(Task.employee_id == employee_id).all()
     
     return tasks
-async def get_employee_dashboard(
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    if current_user.role != UserRole.EMPLOYEE:
-        raise HTTPException(status_code=403, detail="Access denied")
-    
-    # Get current time with timezone info
-    now = datetime.now(timezone.utc)
-    today_start = datetime.combine(now.date(), time.min).replace(tzinfo=timezone.utc)
-    week_start = (today_start - timedelta(days=today_start.weekday())).replace(tzinfo=timezone.utc)
-    month_start = datetime.combine(now.date().replace(day=1), time.min).replace(tzinfo=timezone.utc)
-    
-    # Check if employee is currently clocked in
-    active_session = db.query(WorkSession).filter(
-        WorkSession.employee_id == current_user.id,
-        WorkSession.clock_out == None
-    ).first()
-    
-    # Get current salary and convert to Pydantic model
-    salary_db = db.query(EmployeeSalary).filter(
-        EmployeeSalary.employee_id == current_user.id
-    ).order_by(EmployeeSalary.effective_from.desc()).first()
-    
-    salary = None
-    if salary_db:
-        salary = EmployeeSalaryResponse.from_orm(salary_db)
-    
-    # Calculate work time metrics
-    def calculate_minutes(sessions):
-        return sum(
-            (session.clock_out - session.clock_in).total_seconds() / 60
-            for session in sessions
-            if session.clock_out
-        )
-    
-    # Today's sessions
-    today_sessions = db.query(WorkSession).filter(
-        WorkSession.employee_id == current_user.id,
-        WorkSession.clock_in >= today_start,
-        WorkSession.clock_out != None
-    ).all()
-    today_minutes = calculate_minutes(today_sessions)
-    
-    # This week's sessions
-    week_sessions = db.query(WorkSession).filter(
-        WorkSession.employee_id == current_user.id,
-        WorkSession.clock_in >= week_start,
-        WorkSession.clock_out != None
-    ).all()
-    week_minutes = calculate_minutes(week_sessions)
-    
-    # This month's sessions
-    month_sessions = db.query(WorkSession).filter(
-        WorkSession.employee_id == current_user.id,
-        WorkSession.clock_in >= month_start,
-        WorkSession.clock_out != None
-    ).all()
-    month_minutes = calculate_minutes(month_sessions)
-    
-    # Calculate earnings if salary exists
-    earnings = None
-    if salary:
-        standard_hours = 160
-        standard_minutes = standard_hours * 60
-        overtime_minutes = max(0, month_minutes - standard_minutes)
-        hourly_rate = salary.monthly_salary / standard_hours
-        
-        earnings = {
-            "base_salary": salary.monthly_salary,
-            "currency": salary.currency,
-            "standard_hours": standard_hours,
-            "hours_worked": month_minutes / 60,
-            "overtime_hours": overtime_minutes / 60,
-            "hourly_rate": hourly_rate,
-            "overtime_rate": hourly_rate * 1.5,
-            "overtime_earnings": (overtime_minutes / 60) * (hourly_rate * 1.5),
-            "total_earnings": salary.monthly_salary + ((overtime_minutes / 60) * (hourly_rate * 1.5))
-        }
-    
-    # Get task statistics
-    pending_tasks = db.query(Task).filter(
-        Task.employee_id == current_user.id,
-        Task.status == TaskStatus.PENDING
-    ).count()
-    
-    completed_tasks = db.query(Task).filter(
-        Task.employee_id == current_user.id,
-        Task.status == TaskStatus.COMPLETED
-    ).count()
-    
-    approved_tasks = db.query(Task).filter(
-        Task.employee_id == current_user.id,
-        Task.status == TaskStatus.APPROVED
-    ).count()
-    
-    rejected_tasks = db.query(Task).filter(
-        Task.employee_id == current_user.id,
-        Task.status == TaskStatus.REJECTED
-    ).count()
-    
-    return {
-        "is_clocked_in": active_session is not None,
-        "clocked_in_since": active_session.clock_in if active_session else None,
-        "today_minutes": today_minutes,
-        "week_minutes": week_minutes,
-        "month_minutes": month_minutes,
-        "salary": salary.dict() if salary else None,  # Convert to dict for serialization
-        "earnings": earnings,
-        "pending_tasks": pending_tasks,
-        "completed_tasks": completed_tasks,
-        "approved_tasks": approved_tasks,
-        "rejected_tasks": rejected_tasks
-    }
+
 @app.get("/employees/payroll", response_model=List[PayrollRecordResponse])
 def get_employee_payroll(
     db: Session = Depends(get_db),
@@ -2121,6 +2567,7 @@ def get_employee_payroll(
     ).order_by(PayrollRecord.created_at.desc()).all()
     
     return records
+
 @app.get("/employees/payroll/{period_id}", response_model=PayrollRecordResponse)
 def get_employee_payroll_detail(
     period_id: int,
@@ -2140,6 +2587,7 @@ def get_employee_payroll_detail(
         )
     
     return record
+
 @app.get("/employees/net-salary", response_model=Dict)
 def get_employee_net_salary(
     db: Session = Depends(get_db),
@@ -2221,6 +2669,7 @@ def get_employee_net_salary(
         "period_end": month_end,
         "last_updated": now
     }
+
 @app.get("/employees/timesheets", response_model=List[Dict])
 def get_employee_timesheets(
     start_date: Optional[date] = None,
